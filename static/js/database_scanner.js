@@ -1,0 +1,222 @@
+// Database Vulnerability Scanner JavaScript Handler
+let dbSocket = null;
+let currentResults = [];
+
+function getDbSocket() {
+    if (!dbSocket) {
+        if (typeof io === 'undefined') {
+            console.error('Socket.IO library not loaded');
+            throw new Error('Socket.IO library not available');
+        }
+        dbSocket = io();
+        setupDbSocketListeners();
+    }
+    return dbSocket;
+}
+
+function setupDbSocketListeners() {
+    dbSocket.on('connect', () => {
+        console.log('Database scanner WebSocket connected');
+    });
+
+    dbSocket.on('db_scan_log', (data) => addDbTerminalLine(data.message));
+
+    dbSocket.on('db_scan_progress', (data) => {
+        const progress = data.progress_percent ? `[${data.progress_percent}%]` : '';
+        addDbTerminalLine(`${data.message} ${progress}`);
+        updateDbProgress(data.progress_percent || 0, `${data.current}/${data.total} checks completed`);
+    });
+
+    dbSocket.on('db_scan_complete', (data) => {
+        updateDbProgress(100, 'Scan complete');
+        addDbTerminalLine(`\n✅ Scan completed! Found ${data.total_vulnerabilities} vulnerability(ies).`);
+        
+        const btn = document.getElementById('dbScanBtn');
+        btn.disabled = false;
+        btn.innerText = 'Scan for Vulnerabilities';
+        btn.style.opacity = '1';
+        btn.style.cursor = 'pointer';
+        
+        currentResults = data.results;
+        renderDbResults(data.results);
+        displayDbSummary(data.results);
+    });
+}
+
+function renderDbResults(results) {
+    const container = document.getElementById('dbResultsContainer');
+    if (!container) return;
+
+    container.innerHTML = '';
+
+    if (results.length === 0) {
+        container.innerHTML = `
+            <div style="text-align: center; padding: 40px; background: rgba(16, 185, 129, 0.05); border-radius: 12px; border: 1px solid rgba(16, 185, 129, 0.2);">
+                <p style="color: var(--accent); font-weight: 600; font-size: 1.1em;">✅ No vulnerabilities detected!</p>
+                <p style="color: var(--text-secondary); margin-top: 8px;">Your application appears to have good security controls.</p>
+            </div>`;
+        return;
+    }
+
+    const grid = document.createElement('div');
+    grid.className = 'results-grid';
+
+    results.forEach(vuln => {
+        const card = document.createElement('div');
+        card.className = `vulnerability-card ${vuln.risk.toLowerCase()}`;
+
+        const header = document.createElement('div');
+        header.className = 'vuln-header';
+        header.innerHTML = `
+            <div class="vuln-name">${vuln.name}</div>
+            <span class="risk-badge ${vuln.risk.toLowerCase()}">${vuln.risk}</span>
+        `;
+
+        const description = document.createElement('div');
+        description.className = 'vuln-description';
+        description.textContent = vuln.description;
+
+        const evidence = document.createElement('div');
+        evidence.className = 'vuln-evidence';
+        evidence.textContent = vuln.evidence || 'N/A';
+
+        const recommendation = document.createElement('div');
+        recommendation.className = 'vuln-recommendation';
+        recommendation.textContent = vuln.recommendation || 'Review security best practices';
+
+        card.appendChild(header);
+        card.appendChild(description);
+        card.appendChild(evidence);
+        card.appendChild(recommendation);
+        grid.appendChild(card);
+    });
+
+    container.appendChild(grid);
+}
+
+function displayDbSummary(results) {
+    const summaryContainer = document.getElementById('dbSummaryContainer');
+    if (!summaryContainer) return;
+
+    const critical = results.filter(r => r.risk === 'Critical').length;
+    const high = results.filter(r => r.risk === 'High').length;
+    const medium = results.filter(r => r.risk === 'Medium').length;
+    const low = results.filter(r => r.risk === 'Low').length;
+
+    document.getElementById('totalVulns').textContent = results.length;
+    document.getElementById('criticalCount').textContent = critical;
+    document.getElementById('highCount').textContent = high;
+    document.getElementById('mediumCount').textContent = medium;
+    document.getElementById('lowCount').textContent = low;
+
+    summaryContainer.style.display = 'block';
+}
+
+function addDbTerminalLine(message) {
+    const terminal = document.getElementById('dbTerminal');
+    if (!terminal) return;
+
+    const line = document.createElement('div');
+    line.textContent = '> ' + message;
+    terminal.appendChild(line);
+    terminal.scrollTop = terminal.scrollHeight;
+}
+
+function updateDbProgress(percentage, message = '') {
+    const fillEl = document.getElementById('dbProgressFill');
+    const percentEl = document.getElementById('dbProgressPercent');
+    const msgEl = document.getElementById('dbProgressMessage');
+    
+    if (fillEl) fillEl.style.width = percentage + '%';
+    if (percentEl) percentEl.textContent = percentage + '%';
+    if (msgEl && message) msgEl.textContent = message;
+}
+
+function startDbScan(event) {
+    event.preventDefault();
+
+    const targetInput = document.getElementById('dbTarget');
+    const target = targetInput.value.trim();
+    
+    if (!target) {
+        alert('Please enter a target');
+        return;
+    }
+
+    const deepScan = document.getElementById('dbDeepScan').checked;
+    const btn = document.getElementById('dbScanBtn');
+
+    btn.disabled = true;
+    btn.innerText = 'Scanning...';
+    btn.style.opacity = '0.6';
+    btn.style.cursor = 'not-allowed';
+
+    // Show and reset terminal
+    const terminal = document.getElementById('dbTerminal');
+    terminal.innerHTML = '<div style="color: var(--accent);">> Initializing database vulnerability scan...</div>';
+    document.getElementById('dbProgressContainer').style.display = 'block';
+    document.getElementById('dbSummaryContainer').style.display = 'none';
+    updateDbProgress(0);
+
+    // Clear previous results
+    document.getElementById('dbResultsContainer').innerHTML = '';
+
+    // Get or create socket and emit scan
+    const sock = getDbSocket();
+    
+    if (sock.connected) {
+        sock.emit('start_db_scan', { target: target, deep_scan: deepScan });
+    } else {
+        sock.once('connect', () => {
+            console.log('Socket connected, starting DB scan for: ' + target);
+            sock.emit('start_db_scan', { target: target, deep_scan: deepScan });
+        });
+    }
+}
+
+function exportDatabaseResults() {
+    if (!currentResults || currentResults.length === 0) {
+        alert('No results to export');
+        return;
+    }
+
+    const jsonStr = JSON.stringify(currentResults, null, 2);
+    const blob = new Blob([jsonStr], { type: 'application/json' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'database-vulnerabilities-' + Date.now() + '.json';
+    a.click();
+    window.URL.revokeObjectURL(url);
+}
+
+function initializeDbScannerPage() {
+    console.log('Initializing database vulnerability scanner...');
+    
+    // Check if the form exists before initializing
+    const form = document.querySelector('form');
+    if (!form) {
+        console.warn('Database scanner form not found - page might not be fully loaded');
+        return;
+    }
+    
+    // Initialize socket connection
+    try {
+        getDbSocket();
+    } catch (error) {
+        console.error('Failed to initialize socket:', error);
+        return;
+    }
+    
+    // Handle form submission
+    form.addEventListener('submit', startDbScan);
+    
+    console.log('Database vulnerability scanner initialized');
+}
+
+// Initialize when script loads (handles both initial page load and SPA navigation)
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initializeDbScannerPage);
+} else {
+    initializeDbScannerPage();
+}

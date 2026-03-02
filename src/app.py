@@ -5,6 +5,7 @@ from flask_socketio import SocketIO, emit
 from core.scanner import resolve_target, scan_target, check_subdomain
 from core.reporter import generate_pdf_report
 from core.deep_subdomain_scanner import scan_subdomains_blocking
+from core.database_vulnerability_scanner import scan_database_vulnerabilities_blocking
 import json
 import os
 import secrets
@@ -172,7 +173,7 @@ def clear():
     global latest_results
     latest_results = {'results': None, 'target': '', 'deep_scan': False}
     # Also clear history file for fresh start if requested? No, usually clear just UI.
-    return redirect(url_for('index'))
+    return redirect(url_for('dashboard'))
     #return jsonify({'status': 'cleared'})  Earlier return statement commented out
 
 @app.route('/clear-history', methods=['POST'])
@@ -228,6 +229,14 @@ def subdomain_page():
                 message = "❌ Scan error: " + str(e)
     
     return render_template('subdomain.html', subdomains=subdomains, message=message, active_page='subdomain')
+
+@app.route('/database-vulnerability', methods=['GET', 'POST'])
+def database_vulnerability_page():
+    """Database vulnerability scanner page"""
+    vulnerabilities = []
+    message = ""
+    
+    return render_template('database_vulnerability.html', vulnerabilities=vulnerabilities, message=message, active_page='database-vulnerability')
 
 @app.route('/contact', methods=['GET', 'POST'])
 def contact():
@@ -839,6 +848,114 @@ def run_subdomain_scan_task(domain, deep_scan):
         try:
             socketio.emit('subdomain_log', {'message': f"❌ Error: {str(e)}"})
             socketio.emit('scan_complete', {'domain': domain, 'total_found': 0, 'results': []})
+        except Exception as emit_error:
+            logger.error(f"Failed to emit error message: {emit_error}")
+
+# ============================================================================
+# DATABASE VULNERABILITY SCANNING
+# ============================================================================
+
+@socketio.on('start_db_scan')
+def handle_db_scan(data):
+    """Handle database vulnerability scan request"""
+    target = data.get('target')
+    deep_scan = data.get('deep_scan', False)
+    
+    if not target:
+        emit('db_scan_log', {'message': "❌ No target specified"})
+        return
+    
+    # Run scan in background task
+    socketio.start_background_task(run_db_scan_task, target, deep_scan)
+
+def run_db_scan_task(target, deep_scan):
+    """Background task for database vulnerability scanning"""
+    print(f"Starting background database vulnerability scan for: {target}")
+    
+    try:
+        emit('db_scan_log', {'message': f"🔍 Starting database vulnerability scan for {target}"})
+        emit('db_scan_log', {'message': ""})
+        
+        if deep_scan:
+            emit('db_scan_log', {'message': "🔬 DEEP SCAN MODE: Extended checks enabled"})
+            emit('db_scan_log', {'message': "Testing SQL injection, exposed ports, sensitive files, headers, and CORS"})
+        else:
+            emit('db_scan_log', {'message': "⚡ STANDARD SCAN: Running basic vulnerability checks"})
+        
+        emit('db_scan_log', {'message': ""})
+        
+        def progress_callback(progress_data):
+            """Callback to emit socket events during scanning"""
+            try:
+                percentage = progress_data.get('percentage', 0)
+                current = progress_data.get('current', 0)
+                total = progress_data.get('total', 1)
+                message = progress_data.get('message', '')
+                
+                emit('db_scan_progress', {
+                    'progress_percent': percentage,
+                    'current': current,
+                    'total': total,
+                    'message': message
+                })
+            except Exception as e:
+                logger.error(f"Error in DB progress callback: {e}")
+        
+        # Run the blocking scan function
+        results = scan_database_vulnerabilities_blocking(
+            target, 
+            deep_scan=deep_scan, 
+            progress_callback=progress_callback
+        )
+        
+        # Emit completion
+        emit('db_scan_progress', {
+            'progress_percent': 100,
+            'current': 1,
+            'total': 1,
+            'message': 'Finalizing results'
+        })
+        
+        if results:
+            emit('db_scan_log', {'message': f"✓ Scan completed successfully!"})
+            emit('db_scan_log', {'message': f"Found {len(results)} vulnerability(ies)"})
+            emit('db_scan_log', {'message': ""})
+            
+            # Count vulnerabilities by risk
+            critical_count = sum(1 for r in results if r.get('risk') == 'Critical')
+            high_count = sum(1 for r in results if r.get('risk') == 'High')
+            medium_count = sum(1 for r in results if r.get('risk') == 'Medium')
+            low_count = sum(1 for r in results if r.get('risk') == 'Low')
+            
+            if critical_count > 0:
+                emit('db_scan_log', {'message': f"🔴 Critical: {critical_count}"})
+            if high_count > 0:
+                emit('db_scan_log', {'message': f"🟠 High: {high_count}"})
+            if medium_count > 0:
+                emit('db_scan_log', {'message': f"🟡 Medium: {medium_count}"})
+            if low_count > 0:
+                emit('db_scan_log', {'message': f"🟢 Low: {low_count}"})
+        else:
+            emit('db_scan_log', {'message': "✅ No vulnerabilities detected!"})
+        
+        # Emit completion with all results
+        emit('db_scan_complete', {
+            'target': target,
+            'total_vulnerabilities': len(results),
+            'results': results
+        })
+        
+        print(f"Database vulnerability scan completed for {target}. Found {len(results)} vulnerabilities")
+        
+    except Exception as e:
+        print(f"Error during database vulnerability scan: {e}")
+        logger.error(f"Database scan error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        
+        try:
+            emit('db_scan_log', {'message': f"❌ Error: {str(e)}"})
+            emit('db_scan_complete', {'target': target, 'total_vulnerabilities': 0, 'results': []})
         except Exception as emit_error:
             logger.error(f"Failed to emit error message: {emit_error}")
 

@@ -237,6 +237,7 @@ console.log("main.js loaded - AI analysis ready ✓");
 const navigationRoutes = {
     'dashboard': '/dashboard',
     'history': '/history',
+    'database-vulnerability': '/database-vulnerability',
     'subdomain': '/subdomain',
     'analyzer': '/analyzer',
     'topology': '/topology',
@@ -336,8 +337,22 @@ async function handleNavClick(e) {
         contentArea.innerHTML = '';  // Clear immediately to prevent flashing old content
         contentArea.innerHTML = htmlWithoutScripts;
         
-        // Execute scripts after DOM update
-        scripts.forEach(script => {
+        // Execute only page-specific scripts, not library scripts
+        const scriptsToExecute = scripts.filter(script => {
+            // Skip library/global scripts that should only load once
+            if (script.src) {
+                const src = script.src.toLowerCase();
+                // Skip socket.io, lucide, and main.js - these are already loaded globally
+                // BUT keep page-specific handlers like database_scanner.js, subdomain.js, etc.
+                if (src.includes('socket.io') || src.includes('lucide') || src.includes('/js/main.js')) {
+                    return false;
+                }
+            }
+            // Execute all other scripts (page-specific handlers)
+            return true;
+        });
+        
+        scriptsToExecute.forEach(script => {
             const newScript = document.createElement('script');
             if (script.src) {
                 newScript.src = script.src;
@@ -400,6 +415,14 @@ function reattachEventListeners() {
         console.log('Subdomain page loaded via navigation');
         if (typeof initializeSubdomainPage !== 'undefined') {
             initializeSubdomainPage();
+        }
+    }
+    
+    // For database vulnerability page
+    if (document.getElementById('dbScanBtn')) {
+        console.log('Database vulnerability scanner loaded via navigation');
+        if (typeof initializeDbScannerPage !== 'undefined') {
+            initializeDbScannerPage();
         }
     }
     
